@@ -1,0 +1,1 @@
+import cron from 'node-cron';import {billAll} from './manager_routes.js';export function startMonthlyBilling(){if(process.env.ENABLE_MONTHLY_BILLING!=='true')return;cron.schedule('10 0 * * *',async()=>{try{console.log('Monthly billing:',await billAll());}catch(e){console.error('Billing failed:',e.message)}},{timezone:'Africa/Johannesburg'});}

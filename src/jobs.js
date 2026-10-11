@@ -12,3 +12,6 @@ export function startReminders(){
   }catch(e){console.error('Reminder job error:',e.message);}
  },{timezone:'UTC'});
 }
+
+import {startMonthlyBilling} from './billing.js';
+startMonthlyBilling();

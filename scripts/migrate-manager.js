@@ -1,0 +1,1 @@
+import 'dotenv/config';import {readFileSync} from 'node:fs';import {fileURLToPath} from 'node:url';import {dirname,join} from 'node:path';import {pool} from '../src/db.js';try{await pool.query(readFileSync(join(dirname(fileURLToPath(import.meta.url)),'../sql/002_manager.sql'),'utf8'));console.log('Manager migration completed');}finally{await pool.end();}
