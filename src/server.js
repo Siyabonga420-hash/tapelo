@@ -32,8 +32,8 @@ app.get('/api/public/households/:id/photo', async (req,res,next) => {
   } catch(e) { next(e); }
 });
 app.use('/api',router);
-app.use('/api',adminRouter);
 app.use('/api',managerRouter);
+app.use('/api',adminRouter);
 app.use((req,res)=>res.status(404).json({error:'Route not found'}));
 app.use((err,req,res,next)=>{if(err instanceof ZodError)return res.status(400).json({error:'Invalid input',details:err.flatten()});if(err.code==='23505')return res.status(409).json({error:'Record already exists'});if(err.code==='23503')return res.status(400).json({error:'Related record not found'});if(err.message==='CORS origin not permitted')return res.status(403).json({error:err.message});console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Internal server error'});});
 const port=Number(process.env.PORT)||10000;
