@@ -18,6 +18,18 @@ app.use(cors({origin:(origin,cb)=>{if(!origin||allowed.includes(origin))return c
 app.use(express.json({limit:'4mb'}));
 app.get('/manager',(req,res)=>{res.removeHeader('Content-Security-Policy');res.type('html').send(readFileSync(join(dirname(fileURLToPath(import.meta.url)),'manager.html'),'utf8'));});
 app.use('/api/auth',rateLimit({windowMs:15*60*1000,limit:20,standardHeaders:'draft-7',legacyHeaders:false}));
+app.get('/api/public/households/:id/photo', async (req,res,next) => {
+  try {
+    const {q} = await import('./db.js');
+    const {z} = await import('zod');
+    const id = z.z.string().uuid().parse(req.params.id);
+    const r = await q('SELECT photo_mime,photo_data FROM households WHERE id=$1',[id]);
+    if (!r.rowCount || !r.rows[0].photo_data) return res.sendStatus(404);
+    res.set('Content-Type',r.rows[0].photo_mime);
+    res.set('Cache-Control','public,max-age=3600');
+    res.send(r.rows[0].photo_data);
+  } catch(e) { next(e); }
+});
 app.use('/api',router);
 app.use('/api',managerRouter);
 app.use((req,res)=>res.status(404).json({error:'Route not found'}));
