@@ -1,10 +1,11 @@
 import {Router} from 'express';
 import {auth} from './auth.js';
 import {q} from './db.js';
+import {writeAudit} from './security_audit.js';
 export const adminRouter=Router();
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
-adminRouter.use(auth);
-adminRouter.use(wrap(async(req,res,next)=>{
+adminRouter.use('/admin',auth);
+adminRouter.use('/admin',wrap(async(req,res,next)=>{
   const result=await q('SELECT role FROM users WHERE id=$1',[req.user.sub]);
   if(result.rows[0]?.role!=='admin')return res.status(403).json({error:'Administrator access required'});
   next();
@@ -45,6 +46,7 @@ adminRouter.patch('/admin/users/:id',wrap(async(req,res)=>{
   const result=await q(`UPDATE users SET name=$1,email=$2 WHERE id=$3
     RETURNING id,name,email,role`,[data.name,email,id]);
   if(!result.rowCount)return res.status(404).json({error:'User not found'});
+  await writeAudit({actor:req.user.sub,action:'user.profile_updated',target:id,details:{changed_fields:['name','email']}});
   res.json(result.rows[0]);
 }));
 // Only tenant <-> manager conversions; admin appointments remain a controlled server-side process.
@@ -66,6 +68,7 @@ adminRouter.patch('/admin/users/:id/role',wrap(async(req,res)=>{
   }
   const result=await q(`UPDATE users SET role=$1 WHERE id=$2 AND role IN ('tenant','manager') RETURNING id,name,email,role`,[role,id]);
   if(!result.rowCount)return res.status(409).json({error:'Role changed during request; retry'});
+  await writeAudit({actor:req.user.sub,action:'user.role_changed',target:id,details:{from:existing.rows[0].role,to:role}});
   res.json(result.rows[0]);
 }));
 
@@ -115,4 +118,57 @@ adminRouter.get('/admin/finance/report',wrap(async(req,res)=>{
  AND ($2::uuid IS NULL OR c.household_id=$2::uuid)`,[start,property]);
  res.json({month,property,summary:summary.rows[0],rows:r.rows,truncated:r.rowCount===5000,
  note:'Verified payments only. Payments are attributed to the charge due month, not payment receipt month. Simulated payments are excluded.'});
+}));
+
+
+// Platform configuration is limited to non-sensitive operational preferences.
+const settingValues = {
+  platform_name: z.string().trim().min(2).max(80),
+  support_email: z.union([z.literal(''),z.string().trim().email().max(200)]),
+  maintenance_notice: z.string().trim().max(500),
+  registration_enabled: z.boolean()
+};
+adminRouter.get('/admin/settings',wrap(async(req,res)=>{
+  const r=await q('SELECT key,value,updated_at FROM platform_settings ORDER BY key');
+  res.json(Object.fromEntries(r.rows.map(x=>[x.key,{value:x.value,updated_at:x.updated_at}])));
+}));
+adminRouter.patch('/admin/settings',wrap(async(req,res)=>{
+  const body=z.record(z.unknown()).parse(req.body);
+  const keys=Object.keys(body);
+  if(!keys.length||keys.length>4||keys.some(k=>!(k in settingValues)))return res.status(400).json({error:'Invalid setting keys'});
+  const updated={};
+  for(const key of keys){
+    const value=settingValues[key].parse(body[key]);
+    await q(`INSERT INTO platform_settings(key,value,updated_by,updated_at) VALUES($1,$2::jsonb,$3,now())
+      ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_by=EXCLUDED.updated_by,updated_at=now()`,[key,JSON.stringify(value),req.user.sub]);
+    updated[key]=value;
+  }
+  await writeAudit({actor:req.user.sub,action:'settings.updated',details:{keys}});
+  res.json({updated});
+}));
+adminRouter.get('/admin/audit',wrap(async(req,res)=>{
+  const limit=z.coerce.number().int().min(1).max(200).default(50).parse(req.query.limit);
+  const action=z.string().max(80).optional().parse(req.query.action);
+  const r=await q(`SELECT a.id,a.created_at,a.action,a.target_id,a.details,u.name AS actor_name,u.email AS actor_email
+    FROM security_audit_logs a LEFT JOIN users u ON u.id=a.actor_id
+    WHERE ($1::text IS NULL OR a.action=$1)
+    ORDER BY a.created_at DESC LIMIT $2`,[action||null,limit]);
+  res.json(r.rows);
+}));
+adminRouter.get('/admin/security',wrap(async(req,res)=>{
+  const r=await q(`SELECT
+    (SELECT count(*)::int FROM security_audit_logs WHERE action='auth.login_failed' AND created_at>now()-interval '24 hours') AS failed_logins_24h,
+    (SELECT count(*)::int FROM security_audit_logs WHERE action='auth.login_succeeded' AND created_at>now()-interval '24 hours') AS successful_logins_24h,
+    (SELECT count(*)::int FROM security_audit_logs WHERE action='user.role_changed' AND created_at>now()-interval '7 days') AS role_changes_7d,
+    (SELECT count(*)::int FROM security_audit_logs WHERE action='settings.updated' AND created_at>now()-interval '7 days') AS settings_changes_7d`);
+  const suspicious=await q(`SELECT details->>'email_hash' AS email_hash,count(*)::int AS failures
+    FROM security_audit_logs WHERE action='auth.login_failed' AND created_at>now()-interval '24 hours'
+    GROUP BY details->>'email_hash' HAVING count(*)>=5 ORDER BY failures DESC LIMIT 20`);
+  res.json({metrics:r.rows[0],repeated_failures:suspicious.rows,window:'24 hours; events collected only after this upgrade'});
+}));
+adminRouter.get('/admin/system',wrap(async(req,res)=>{
+  const r=await q('SELECT current_database() AS database_name,version() AS database_version');
+  res.json({service:'RentMate API',environment:process.env.NODE_ENV||'unspecified',node:process.version,
+    uptime_seconds:Math.floor(process.uptime()),database:r.rows[0].database_name,
+    database_engine:'PostgreSQL',server_time:new Date().toISOString(),audit_enabled:true});
 }));

@@ -7,6 +7,8 @@ import {ZodError} from 'zod';
 import {router} from './routes.js';
 import {managerRouter} from './manager_routes.js';
 import {adminRouter} from './admin_routes.js';
+import {q} from './db.js';
+import {ensureSecuritySchema,writeAudit,hashIdentifier} from './security_audit.js';
 import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {dirname,join} from 'node:path';
@@ -31,10 +33,35 @@ app.get('/api/public/households/:id/photo', async (req,res,next) => {
     res.send(r.rows[0].photo_data);
   } catch(e) { next(e); }
 });
+// Capture login outcomes without storing passwords, raw emails or IP addresses.
+app.use('/api/auth/login',(req,res,next)=>{
+  const emailHash=hashIdentifier(req.body?.email);
+  const ipHash=hashIdentifier(req.ip);
+  res.on('finish',()=>{
+    const action=res.statusCode===200?'auth.login_succeeded':res.statusCode===401?'auth.login_failed':null;
+    if(action)writeAudit({action,details:{email_hash:emailHash,ip_hash:ipHash,status:res.statusCode}})
+      .catch(e=>console.error('Login audit write failed:',e.message));
+  });
+  next();
+});
+// Always verify current DB role for privileged manager routes.
+app.use('/api/manager',async(req,res,next)=>{
+  try {
+    const {auth}=await import('./auth.js');
+    auth(req,res,async()=>{
+      try {
+        const result=await q('SELECT role FROM users WHERE id=$1',[req.user.sub]);
+        if(!['manager','admin'].includes(result.rows[0]?.role))return res.status(403).json({error:'Manager access required'});
+        next();
+      } catch(e){next(e);}
+    });
+  } catch(e){next(e);}
+});
+app.use('/api/auth/register',async(req,res,next)=>{try{const r=await q("SELECT value FROM platform_settings WHERE key='registration_enabled'");if(r.rows[0]?.value===false)return res.status(403).json({error:'Registration is currently disabled'});next();}catch(e){next(e);}});
 app.use('/api',router);
 app.use('/api',managerRouter);
 app.use('/api',adminRouter);
 app.use((req,res)=>res.status(404).json({error:'Route not found'}));
 app.use((err,req,res,next)=>{if(err instanceof ZodError)return res.status(400).json({error:'Invalid input',details:err.flatten()});if(err.code==='23505')return res.status(409).json({error:'Record already exists'});if(err.code==='23503')return res.status(400).json({error:'Related record not found'});if(err.message==='CORS origin not permitted')return res.status(403).json({error:err.message});console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Internal server error'});});
 const port=Number(process.env.PORT)||10000;
-app.listen(port,'0.0.0.0',()=>{console.log(`RentMate API listening on ${port}`);startReminders();});
+ensureSecuritySchema().then(()=>app.listen(port,'0.0.0.0',()=>{console.log(`RentMate API listening on ${port}`);startReminders();})).catch(e=>{console.error('Security schema initialization failed:',e);process.exit(1);});
