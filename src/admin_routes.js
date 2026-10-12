@@ -30,3 +30,41 @@ adminRouter.get('/admin/properties',wrap(async(req,res)=>{
  FROM households h LEFT JOIN users u ON u.id=h.manager_id ORDER BY h.name LIMIT 1000`);
  res.json(r.rows);
 }));
+
+// Admin user management: validated edits, database-backed role checks, no public privilege escalation.
+import {z} from 'zod';
+const userId=z.string().uuid();
+const profileSchema=z.object({
+  name:z.string().trim().min(2).max(100),
+  email:z.string().trim().email().max(200)
+}).strict();
+adminRouter.patch('/admin/users/:id',wrap(async(req,res)=>{
+  const id=userId.parse(req.params.id);
+  const data=profileSchema.parse(req.body);
+  const email=data.email.toLowerCase();
+  const result=await q(`UPDATE users SET name=$1,email=$2 WHERE id=$3
+    RETURNING id,name,email,role`,[data.name,email,id]);
+  if(!result.rowCount)return res.status(404).json({error:'User not found'});
+  res.json(result.rows[0]);
+}));
+// Only tenant <-> manager conversions; admin appointments remain a controlled server-side process.
+adminRouter.patch('/admin/users/:id/role',wrap(async(req,res)=>{
+  const id=userId.parse(req.params.id);
+  const {role}=z.object({role:z.enum(['tenant','manager'])}).strict().parse(req.body);
+  if(id===req.user.sub)return res.status(403).json({error:'You cannot change your own role'});
+  const existing=await q('SELECT role FROM users WHERE id=$1',[id]);
+  if(!existing.rowCount)return res.status(404).json({error:'User not found'});
+  if(existing.rows[0].role==='admin')return res.status(403).json({error:'Administrator roles cannot be changed here'});
+  if(existing.rows[0].role===role)return res.json({id,role});
+  if(role==='tenant'){
+    const owns=await q('SELECT 1 FROM households WHERE manager_id=$1 LIMIT 1',[id]);
+    if(owns.rowCount)return res.status(409).json({error:'This manager owns properties. Reassign them before changing their role.'});
+  }
+  if(role==='manager'){
+    const active=await q('SELECT 1 FROM memberships WHERE user_id=$1 LIMIT 1',[id]);
+    if(active.rowCount)return res.status(409).json({error:'This tenant belongs to a household. Remove their membership before changing their role.'});
+  }
+  const result=await q(`UPDATE users SET role=$1 WHERE id=$2 AND role IN ('tenant','manager') RETURNING id,name,email,role`,[role,id]);
+  if(!result.rowCount)return res.status(409).json({error:'Role changed during request; retry'});
+  res.json(result.rows[0]);
+}));
