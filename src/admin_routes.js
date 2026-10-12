@@ -68,3 +68,18 @@ adminRouter.patch('/admin/users/:id/role',wrap(async(req,res)=>{
   if(!result.rowCount)return res.status(409).json({error:'Role changed during request; retry'});
   res.json(result.rows[0]);
 }));
+
+// Read-only system-wide property oversight. Administrator middleware above checks current DB role.
+adminRouter.get('/admin/properties/:id/oversight',wrap(async(req,res)=>{
+ const propertyId=userId.parse(req.params.id);
+ const result=await q(`SELECT h.id,h.name,h.address,h.rooms_count,h.monthly_rent_cents,h.due_day,
+  u.name AS manager_name,u.email AS manager_email,
+  (SELECT count(*)::int FROM memberships m JOIN users t ON t.id=m.user_id
+   WHERE m.household_id=h.id AND t.role='tenant') AS occupied,
+  (SELECT count(*)::int FROM join_requests j WHERE j.household_id=h.id AND j.status='pending') AS pending,
+  (SELECT count(*)::int FROM join_requests j WHERE j.household_id=h.id AND j.status='approved') AS approved_requests,
+  (SELECT count(*)::int FROM join_requests j WHERE j.household_id=h.id AND j.status='rejected') AS rejected_requests
+  FROM households h LEFT JOIN users u ON u.id=h.manager_id WHERE h.id=$1`,[propertyId]);
+ if(!result.rowCount)return res.status(404).json({error:'Property not found'});
+ res.json(result.rows[0]);
+}));
