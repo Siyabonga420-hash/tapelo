@@ -83,3 +83,36 @@ adminRouter.get('/admin/properties/:id/oversight',wrap(async(req,res)=>{
  if(!result.rowCount)return res.status(404).json({error:'Property not found'});
  res.json(result.rows[0]);
 }));
+
+// Read-only financial reporting. Only verified payments count as received money.
+adminRouter.get('/admin/finance/report',wrap(async(req,res)=>{
+ const month=z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).parse(req.query.month);
+ const property=req.query.property ? userId.parse(req.query.property) : null;
+ const start=month+'-01';
+ const r=await q(`WITH payments AS (
+   SELECT charge_id,COALESCE(SUM(amount_cents),0)::bigint AS paid
+   FROM verified_payments GROUP BY charge_id
+ ), ledger AS (
+   SELECT c.id,c.household_id,c.tenant_id,c.due_date,c.amount_cents,
+     LEAST(c.amount_cents,COALESCE(p.paid,0))::bigint AS paid_cents,
+     GREATEST(c.amount_cents-COALESCE(p.paid,0),0)::bigint AS outstanding_cents,
+     h.name AS property_name,u.name AS tenant_name,u.email AS tenant_email
+   FROM charges c
+   LEFT JOIN payments p ON p.charge_id=c.id
+   LEFT JOIN households h ON h.id=c.household_id
+   JOIN users u ON u.id=c.tenant_id
+   WHERE c.due_date >= $1::date AND c.due_date < ($1::date + INTERVAL '1 month')
+     AND ($2::uuid IS NULL OR c.household_id=$2::uuid)
+ ) SELECT id,household_id,tenant_id,due_date,amount_cents,paid_cents,outstanding_cents,
+   property_name,tenant_name,tenant_email FROM ledger ORDER BY due_date DESC,property_name,tenant_name LIMIT 5000`,[start,property]);
+ const summary=await q(`WITH payments AS (
+  SELECT charge_id,COALESCE(SUM(amount_cents),0)::bigint AS paid FROM verified_payments GROUP BY charge_id
+ ) SELECT COUNT(*)::int AS charge_count,COALESCE(SUM(c.amount_cents),0)::bigint AS charged_cents,
+ COALESCE(SUM(LEAST(c.amount_cents,COALESCE(p.paid,0))),0)::bigint AS paid_cents,
+ COALESCE(SUM(GREATEST(c.amount_cents-COALESCE(p.paid,0),0)),0)::bigint AS outstanding_cents
+ FROM charges c LEFT JOIN payments p ON p.charge_id=c.id
+ WHERE c.due_date >= $1::date AND c.due_date < ($1::date + INTERVAL '1 month')
+ AND ($2::uuid IS NULL OR c.household_id=$2::uuid)`,[start,property]);
+ res.json({month,property,summary:summary.rows[0],rows:r.rows,truncated:r.rowCount===5000,
+ note:'Verified payments only. Payments are attributed to the charge due month, not payment receipt month. Simulated payments are excluded.'});
+}));
